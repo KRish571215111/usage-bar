@@ -1,0 +1,20 @@
+{
+  "name": "usage-bar",
+  "version": "1.0.0",
+  "description": "A visual usage bar above the prompt: 5-hour and weekly limits, a run-out forecast and token charts. Minimises to a gauge.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "KR Studio"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/KRish571215111/usage-bar",
+  "homepage": "https://github.com/KRish571215111/usage-bar",
+  "keywords": [
+    "usage",
+    "limits",
+    "tokens",
+    "forecast",
+    "dashboard"
+  ],
+  "icon": "./.claude-plugin/icon.png"
+}

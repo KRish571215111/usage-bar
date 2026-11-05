@@ -1,0 +1,14 @@
+{
+  "name": "usage-bar",
+  "description": "A visual usage bar for Claude Code",
+  "owner": {
+    "name": "KR Studio"
+  },
+  "plugins": [
+    {
+      "name": "usage-bar",
+      "source": "./",
+      "description": "A visual usage bar above the prompt: 5-hour and weekly limits, a run-out forecast and token charts. Minimises to a gauge."
+    }
+  ]
+}
