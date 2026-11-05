@@ -153,3 +153,34 @@ test('a limit reads its own pace', () => {
   expect(paceOf(week(70), at)?.text).toContain('Out')
   expect(paceOf({ kind: 'five_hour', percentUsed: 80, resetsAt }, RESET - 4 * HOUR)?.text).toContain('Out')
 })
+
+test('/usage-bar disable hides the bar and enable brings it back', async ($, on) => {
+  mock.clock(on, { now: RESET - 3 * DAY })
+  mock.store(on)
+  on('ui.close', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
+  on('session.id', () => ({ value: 'test' }))
+  on('fs.exists', () => ({ value: false }))
+  on('env.get', () => ({ value: undefined }))
+  // Stands for the engine's empty band beneath the mod.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'usage-details' })).toBeDefined()
+
+  const off = await $.command.run({ command: 'usage-bar', args: 'disable' })
+  expect(off.text).toContain('off')
+  expect(await ui.find({ key: 'usage-details' })).toBeUndefined()
+  expect(await ui.find({ key: 'usage-open' })).toBeUndefined()
+
+  const again = await $.command.run({ command: 'usage-bar', args: 'enable' })
+  expect(again.text).toContain('on')
+  expect(await ui.find({ key: 'usage-details' })).toBeDefined()
+
+  const unknown = await $.command.run({ command: 'usage-bar', args: 'banana' })
+  expect(unknown.text).toContain('Try')
+  await ui.unmount()
+})

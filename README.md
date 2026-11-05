@@ -64,12 +64,16 @@ In the desktop app, where `/plugin` does not run: click **+** next to the prompt
 | ⤢ | Opens the full view above the prompt |
 | ✕ | Closes the full view back down to the gauge |
 
-`/usage-bar` opens the same details in a side pane.
+| Command | What it does |
+| --- | --- |
+| `/usage-bar disable` | Hides the bar and stops the background counting. It stays off in new sessions. |
+| `/usage-bar enable` | Brings the bar back |
+| `/usage-bar` or `/usage-bar details` | Opens the full details in a side pane |
 
-To turn it off:
+To remove the plugin altogether:
 
 ```bash
-claude plugin disable usage-bar
+claude plugin uninstall usage-bar
 ```
 
 ## Where it works

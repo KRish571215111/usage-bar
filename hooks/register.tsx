@@ -157,7 +157,8 @@ function nextSamples(history: readonly Sample[], list: readonly Limit[], now: nu
 }
 
 const isArray = (v: unknown): v is unknown[] => Array.isArray(v)
-const isView = (v: unknown): v is View => v === 'dot' || v === 'bar' || v === 'full'
+const isView = (v: unknown): v is View =>
+  v === 'off' || v === 'dot' || v === 'bar' || v === 'full'
 
 let isScanning = false
 let lastScanAt = 0
@@ -215,6 +216,16 @@ async function scan($: Api): Promise<void> {
   }
 }
 
+// Turned off, the mod does no counting in the background either.
+async function scanWhenOn($: Api): Promise<void> {
+  if ((await read($, view)) !== 'off') await scan($)
+}
+
+async function setView($: Api, to: View): Promise<void> {
+  await update($, view, () => to)
+  await $.store.set('view', to)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const offset = await $.store.get('utcOffset')
@@ -224,26 +235,47 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'usage-bar',
-      description: 'Open the full usage details in a pane',
+      description: 'Turn the usage bar on or off, or open the full details in a pane',
+      argumentHint: '[enable|disable|details]',
     })
     await refresh($).catch(() => undefined)
-    void scan($)
+    void scanWhenOn($)
     $.clock.every(MIN, () => {
       void refresh($).catch(() => undefined)
     })
     $.clock.every(90_000, () => {
-      void scan($)
+      void scanWhenOn($)
     })
 
     // The editor has no band above the prompt, so its details live in a pane.
-    if ((await $.session.surfaces()).includes('vscode')) {
+    const isOff = (await read($, view)) === 'off'
+    if (!isOff && (await $.session.surfaces()).includes('vscode')) {
       void $.ui.open({ id: PANE, title: 'Usage' })
     }
 
     return next(e)
   })
 
-  on('command.run', { command: 'usage-bar' }, async $ => {
+  on('command.run', { command: 'usage-bar' }, async ($, e) => {
+    const word = e.args.trim().toLowerCase()
+
+    if (word === 'enable' || word === 'on') {
+      await setView($, 'bar')
+      void scan($)
+
+      return { text: 'Usage bar on.' }
+    }
+    if (word === 'disable' || word === 'off') {
+      await setView($, 'off')
+      await $.ui.close({ id: PANE }).catch(() => undefined)
+
+      return { text: 'Usage bar off. /usage-bar enable brings it back.' }
+    }
+    if (word !== '' && word !== 'details') {
+      return { text: 'Try /usage-bar enable, /usage-bar disable or /usage-bar details.' }
+    }
+
+    void scan($)
     await $.ui.open({ id: PANE, title: 'Usage' })
 
     return { text: 'Usage details opened.' }
@@ -256,7 +288,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    void scan($)
+    void scanWhenOn($)
 
     return next(e)
   })
@@ -266,6 +298,8 @@ export const register: Register = on => {
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const shown = await read($, view)
+    if (shown === 'off') return next(e)
+
     const set = (to: View) => async () => {
       await update($, view, () => to)
       await $.store.set('view', to)

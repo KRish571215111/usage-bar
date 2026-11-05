@@ -1,4 +1,4 @@
-export type View = 'dot' | 'bar' | 'full'
+export type View = 'off' | 'dot' | 'bar' | 'full'
 
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
