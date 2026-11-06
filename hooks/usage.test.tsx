@@ -40,6 +40,13 @@ describe('the run-out prediction', () => {
     expect(p.text).toBe('Expected run out Tuesday morning')
   })
 
+  test('the small hours read as early morning, not night', () => {
+    // About 3 AM on the day of the reset: before it, so orange.
+    const p = predict(week(52.7), [], RESET - 3.5 * DAY)
+    expect(p.color).toBe(ORANGE)
+    expect(p.text).toBe('Expected run out Tuesday early morning')
+  })
+
   test('running out Sunday afternoon is red', () => {
     const now = Date.parse('2026-11-05T12:30:00Z') // Thursday 6 PM at UTC+5:30.
     const elapsed = now - (RESET - 7 * DAY)

@@ -64,7 +64,7 @@ function bar(pct: number, cells = 10): string {
 
 function dayPart(ms: number): string {
   const h = localHour(ms)
-  if (h < 5) return 'night'
+  if (h < 5) return 'early morning'
   if (h < 12) return 'morning'
   if (h < 17) return 'afternoon'
   if (h < 21) return 'evening'

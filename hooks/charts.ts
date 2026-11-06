@@ -266,7 +266,7 @@ export function stripSvg(
     rect(0.5, 0.5, W - 1, H - 1, BG, 10).replace('/>', ` stroke="${LINE}"/>`) +
       `<g transform="translate(10 3)">${meter(0, '5h', hour5, 88)}${meter(100, 'Week', week, 104, pace)}</g>` +
       `<circle cx="228" cy="22" r="5" fill="${prediction.color}"/>` +
-      t(238, 26, clip(prediction.text, 37), { size: 12, color: prediction.color, weight: 600 }) +
+      t(238, 26, clip(prediction.text, 41), { size: 12, color: prediction.color, weight: 600 }) +
       (today === null
         ? ''
         : t(W - 10, 20, amount(today), { size: 14, anchor: 'end', weight: 700 }) +
