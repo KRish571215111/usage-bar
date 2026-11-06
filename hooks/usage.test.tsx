@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { amount, paceOf, setUtcOffset, when } from './charts'
-import { mergeLimits, predict } from './register'
+import { ageOf, mergeLimits, predict } from './register'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -24,25 +24,25 @@ const BAND = {
 describe('the run-out prediction', () => {
   test('on pace to reach the reset is green', () => {
     // Half the window gone, under half the limit used.
-    const p = predict(week(40), [], RESET - 3.5 * DAY)
+    const p = predict(week(40), RESET - 3.5 * DAY)
     expect(p.color).toBe(GREEN)
     expect(p.text).toContain('Lasts till reset')
   })
 
   test('exactly on pace for the reset is green', () => {
-    expect(predict(week(50), [], RESET - 3.5 * DAY).color).toBe(GREEN)
+    expect(predict(week(50), RESET - 3.5 * DAY).color).toBe(GREEN)
   })
 
   test('running out the morning of the reset is orange', () => {
     // 3.5 days in at 53%: 100% lands about 2h 45m before the reset.
-    const p = predict(week(51.3), [], RESET - 3.5 * DAY)
+    const p = predict(week(51.3), RESET - 3.5 * DAY)
     expect(p.color).toBe(ORANGE)
     expect(p.text).toBe('Expected run out Tuesday morning')
   })
 
   test('the small hours read as early morning, not night', () => {
     // About 3 AM on the day of the reset: before it, so orange.
-    const p = predict(week(52.7), [], RESET - 3.5 * DAY)
+    const p = predict(week(52.7), RESET - 3.5 * DAY)
     expect(p.color).toBe(ORANGE)
     expect(p.text).toBe('Expected run out Tuesday early morning')
   })
@@ -52,26 +52,32 @@ describe('the run-out prediction', () => {
     const elapsed = now - (RESET - 7 * DAY)
     const out = Date.parse('2026-11-08T09:30:00Z') // Sunday 3 PM at UTC+5:30.
     const pct = (100 * elapsed) / (elapsed + (out - now))
-    const p = predict(week(pct), [], now)
+    const p = predict(week(pct), now)
     expect(p.color).toBe(RED)
     expect(p.text).toBe('Expected run out Sunday afternoon')
   })
 
-  test('the last 24 hours move it: a quiet day pulls it back to green', () => {
-    const now = RESET - 3.5 * DAY
-    const history = [{ t: now - 20 * HOUR, pct: 59, resetsAt }]
-    expect(predict(week(60), [], now).color).toBe(RED)
-    expect(predict(week(60), history, now).color).toBe(GREEN)
+  test('60% on Friday evening runs out Sunday night, as Settings says', () => {
+    const p = predict(week(60), Date.parse('2026-11-06T13:00:00Z'))
+    expect(p.text).toBe('Expected run out Sunday night')
+    expect(p.color).toBe(RED)
+  })
+
+  test('an old reading is paced from when it was read', () => {
+    const now = Date.parse('2026-11-06T13:00:00Z')
+    const fresh = predict(week(60), now)
+    const old = predict(week(60), now, now - 12 * HOUR)
+    expect(old.runsOutAt).toBeLessThan(fresh.runsOutAt as number)
   })
 
   test('a limit already used up says so', () => {
-    const p = predict(week(100), [], RESET - DAY)
+    const p = predict(week(100), RESET - DAY)
     expect(p.color).toBe(RED)
     expect(p.text).toContain('Run out')
   })
 
   test('no reading yet stays neutral', () => {
-    expect(predict(undefined, [], RESET).text).toContain('next reply')
+    expect(predict(undefined, RESET).text).toContain('next reply')
   })
 })
 
@@ -190,4 +196,10 @@ test('/usage-bar disable hides the bar and enable brings it back', async ($, on)
   const unknown = await $.command.run({ command: 'usage-bar', args: 'banana' })
   expect(unknown.text).toContain('Try')
   await ui.unmount()
+})
+
+test('a reading says how old it is once that matters', () => {
+  expect(ageOf(RESET, RESET + 60_000)).toBeNull()
+  expect(ageOf(RESET, RESET + 2 * HOUR)).toBe('Reading 2h 0m old')
+  expect(ageOf(0, RESET)).toBeNull()
 })

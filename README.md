@@ -20,7 +20,7 @@ A visual usage bar for Claude Code. It sits above your prompt and shows how much
 | Orange | You run out less than 24 hours before the reset |
 | Red | You run out more than 24 hours before the reset |
 
-The pace is half your whole week so far and half your last 24 hours.
+The pace is your whole week so far, run forward from your last reading.
 
 **The full view**
 
@@ -86,7 +86,7 @@ claude plugin uninstall usage-bar
 
 ## Good to know
 
-- **Limits appear after a reply.** Claude Code reports them with each response, so a brand new install fills in after your next one. Limits only exist on a subscription plan.
+- **Limits update with replies.** Claude Code gives a mod your limits only with each response. Chats with the mod share their readings, so the bar catches up after the next reply in any of them, and it tells you how old a reading is. Usage on your phone, on the web, or in chats opened before you installed the mod shows up late, so the numbers can briefly sit below the usage screen in Settings. Limits only exist on a subscription plan.
 - **Token totals include cache reads**, which are usually most of the number.
 - **Tokens are counted on this computer.** Usage on claude.ai or your phone counts towards your limits but not the token totals.
 - **"All time" starts at your oldest transcript.** Claude Code cleans old transcripts away. Totals already counted stay, but anything cleaned before you installed this cannot be counted.

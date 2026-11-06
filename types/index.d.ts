@@ -37,6 +37,7 @@ declare module 'claude-code' {
     'usage-bar': {
       view: View
       limits: Limit[]
+      limitsAt: number
       samples: Sample[]
       summary: Summary | null
       scanNote: string | null

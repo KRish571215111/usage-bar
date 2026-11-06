@@ -46,6 +46,7 @@ const WEEK = 7 * DAY
 
 const view = atom({ plugin: 'usage-bar', key: 'view' } as const, 'bar')
 const limits = atom({ plugin: 'usage-bar', key: 'limits' } as const, [])
+const limitsAt = atom({ plugin: 'usage-bar', key: 'limitsAt' } as const, 0)
 const samples = atom({ plugin: 'usage-bar', key: 'samples' } as const, [])
 const summary = atom({ plugin: 'usage-bar', key: 'summary' } as const, null)
 const scanNote = atom({ plugin: 'usage-bar', key: 'scanNote' } as const, null)
@@ -99,13 +100,18 @@ export function mergeLimits(a: readonly Limit[], b: readonly Limit[]): Limit[] {
   return [...out.values()]
 }
 
-// Runs the pace forward to 100%: half the pace over the whole window so far, half
-// the last 24 hours, which holds a full day-night cycle and so no sleep bias.
-export function predict(
-  week: Limit | undefined,
-  history: readonly Sample[],
-  now: number,
-): Prediction {
+// How old the limit reading is, once it is old enough to matter. Claude Code
+// reports limits only with a reply, so usage elsewhere shows up late.
+export function ageOf(readAt: number, now: number): string | null {
+  if (readAt <= 0 || now - readAt < 3 * MIN) return null
+
+  return `Reading ${countdown(now - readAt)} old`
+}
+
+// Runs the pace over the whole window so far forward to 100%, as the usage screen
+// in Settings does. The pace is taken where the reading was: dividing an old
+// percentage by the time since would understate it.
+export function predict(week: Limit | undefined, now: number, readAt: number = now): Prediction {
   if (!week?.resetsAt) {
     return { color: GRAY, text: 'Prediction after the next reply' }
   }
@@ -117,20 +123,14 @@ export function predict(
     return { color: RED, text: `Run out, back ${resetText}`, runsOutAt: now }
   }
 
-  const elapsed = now - (resetAt - WEEK)
+  const at = readAt > 0 ? Math.min(readAt, now) : now
+  const elapsed = at - (resetAt - WEEK)
   if (elapsed <= 0 || pct <= 0) {
     return { color: GREEN, text: `Lasts till reset, ${resetText}` }
   }
 
-  const windowRate = pct / elapsed
-  const inWindow = history.filter(
-    s => Math.abs(Date.parse(s.resetsAt) - resetAt) < HOUR && s.t >= now - DAY && s.t < now,
-  )
-  const oldest = inWindow[0]
-  const hasDay = oldest !== undefined && now - oldest.t >= 3 * HOUR
-  const recentRate = hasDay ? Math.max(0, pct - oldest.pct) / (now - oldest.t) : windowRate
-  const rate = (windowRate + recentRate) / 2
-  const runsOutAt = rate > 0 ? now + (100 - pct) / rate : Infinity
+  const rate = pct / elapsed
+  const runsOutAt = Math.max(now, at + (100 - pct) / rate)
 
   if (runsOutAt >= resetAt) {
     return { color: GREEN, text: `Lasts till reset, ${resetText}`, rate }
@@ -163,7 +163,8 @@ const isView = (v: unknown): v is View =>
 let isScanning = false
 let lastScanAt = 0
 
-async function refresh($: Api, seen?: readonly Limit[]): Promise<void> {
+// `isFresh`: a reply just came in, so the reading is new even if no number moved.
+async function refresh($: Api, seen?: readonly Limit[], isFresh = false): Promise<void> {
   const now = await $.clock.now()
   const stored = await $.store.get('limits')
   const usage = await $.session.usage()
@@ -173,10 +174,16 @@ async function refresh($: Api, seen?: readonly Limit[]): Promise<void> {
     ...(usage.cost === undefined ? {} : { usd: usage.cost.usd }),
   }
   await update($, session, () => stats)
-  const merged = mergeLimits(isArray(stored) ? (stored as Limit[]) : [], reported)
+  const before = isArray(stored) ? (stored as Limit[]) : []
+  const merged = mergeLimits(before, reported)
+  const heldAt = await $.store.get('limitsAt')
+  const isNew = isFresh || JSON.stringify(before) !== JSON.stringify(merged)
+  const readAt = isNew || typeof heldAt !== 'number' ? now : heldAt
   const held = await $.store.get('samples')
   const history = nextSamples(isArray(held) ? (held as Sample[]) : [], merged, now)
   await $.store.set('limits', merged)
+  await $.store.set('limitsAt', readAt)
+  await update($, limitsAt, () => readAt)
   await $.store.set('samples', history)
   await update($, limits, () => merged)
   await update($, samples, () => history)
@@ -282,12 +289,13 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await refresh($, e.rateLimits).catch(() => undefined)
+    await refresh($, e.rateLimits, true).catch(() => undefined)
 
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
+    await refresh($, undefined, true).catch(() => undefined)
     void scanWhenOn($)
 
     return next(e)
@@ -310,7 +318,9 @@ export const register: Register = on => {
     const list = await read($, limits)
     const week = current(list.find(l => l.kind === 'seven_day'), now)
     const hour5 = current(list.find(l => l.kind === 'five_hour'), now)
-    const prediction = predict(week, await read($, samples), now)
+    const readAt = await read($, limitsAt)
+    const prediction = predict(week, now, readAt)
+    const age = list.length > 0 ? ageOf(readAt, now) : null
     const totals = await read($, summary)
 
     if (shown === 'dot') {
@@ -374,6 +384,7 @@ export const register: Register = on => {
             <Text color={prediction.color} weight="semibold">
               {prediction.text}
             </Text>
+            {age ? <Text dimColor>{age}</Text> : null}
             {todayTokens === null ? null : (
               <Text>
                 <Text weight="semibold">{amount(todayTokens)}</Text>
@@ -404,7 +415,7 @@ export const register: Register = on => {
               ✕
             </Button>
           </Box>
-          {dashboard(Box, Text, Svg, list, week, history, prediction, stats, totals, note, now)}
+          {dashboard(Box, Text, Svg, list, week, history, prediction, stats, totals, note, now, readAt, age)}
         </Box>
       )
     }
@@ -414,7 +425,7 @@ export const register: Register = on => {
         {controls}
         <Box flexGrow={1} flexShrink={1}>
           <Svg
-            source={stripSvg(hour5, week, prediction, todayTokens, now)}
+            source={stripSvg(hour5, week, prediction, todayTokens, now, age)}
             alt={`5 hour ${hour5?.percentUsed ?? 'unknown'} percent, week ${week?.percentUsed ?? 'unknown'} percent. ${prediction.text}.`}
           />
         </Box>
@@ -431,7 +442,9 @@ export const register: Register = on => {
     const list = await read($, limits)
     const week = current(list.find(l => l.kind === 'seven_day'), now)
     const history = await read($, samples)
-    const prediction = predict(week, history, now)
+    const readAt = await read($, limitsAt)
+    const prediction = predict(week, now, readAt)
+    const age = list.length > 0 ? ageOf(readAt, now) : null
     const totals = await read($, summary)
     const note = await read($, scanNote)
 
@@ -441,6 +454,7 @@ export const register: Register = on => {
           <Text color={prediction.color} weight="semibold">
             {prediction.text}
           </Text>
+          {age ? <Text dimColor>{age}</Text> : null}
           {details(Box, Text, list, totals, note, now)}
         </Box>
       )
@@ -449,7 +463,7 @@ export const register: Register = on => {
     const { Svg } = table as ElementTable<'desktop'>
     const stats = await read($, session)
 
-    return dashboard(Box, Text, Svg, list, week, history, prediction, stats, totals, note, now)
+    return dashboard(Box, Text, Svg, list, week, history, prediction, stats, totals, note, now, readAt, age)
   })
 }
 
@@ -466,14 +480,17 @@ function dashboard(
   totals: Summary | null,
   note: string | null,
   now: number,
+  readAt: number,
+  age: string | null,
 ) {
   const windows = list.map(l => ({ ...l, ...current(l, now) }))
+  const at = readAt > 0 ? Math.min(readAt, now) : now
   const chart = (source: string, alt: string) => <Svg source={source} alt={alt} />
 
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
-      {chart(gaugesCard(windows, now), 'Limit gauges')}
-      {chart(forecastCard(week, history, prediction, now), `Weekly forecast. ${prediction.text}.`)}
+      {chart(gaugesCard(windows, now, at, age), 'Limit gauges')}
+      {chart(forecastCard(week, history, prediction, at), `Weekly forecast. ${prediction.text}.`)}
       {totals ? (
         <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
           {chart(periodsCard(totals), 'Tokens today, this week, month, year and all time')}

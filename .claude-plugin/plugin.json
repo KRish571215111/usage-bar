@@ -1,6 +1,6 @@
 {
   "name": "usage-bar",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "A visual usage bar above the prompt: 5-hour and weekly limits, a run-out forecast and token charts. Minimises to a gauge.",
   "types": "./types/index.d.ts",
   "author": {
