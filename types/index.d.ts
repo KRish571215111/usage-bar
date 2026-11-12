@@ -1,6 +1,14 @@
 export type View = 'off' | 'dot' | 'bar' | 'full'
 
-export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
+export type Limit = {
+  kind: string
+  percentUsed: number
+  resetsAt?: string
+  /** When Claude Code reported this figure, in ms; 0 or absent when unknown. */
+  readAt?: number
+  /** What brought it: `reply` (a turn ended or a window moved), `poll`, `session` (time unknown). */
+  source?: string
+}
 
 export type Sample = { t: number; pct: number; resetsAt: string }
 

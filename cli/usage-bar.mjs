@@ -76,9 +76,27 @@ const REASONS = {
   no_windows: 'Claude Code has not reported any limits yet. They come with the next reply.',
 }
 
-function windowStatus(entry, now) {
+const ageSeconds = (ms, now) => (Number.isNaN(ms) ? null : Math.max(0, Math.floor((now - ms) / 1000)))
+
+// When Claude Code reported this window's figure, how long ago, and how it came.
+// Snapshots from Usage Bar 1.3.0 have one time for all windows: `fallbackAt`.
+function readingOf(entry, now, fallbackAt, maxAgeSeconds) {
+  const at = entry.reading_at ?? fallbackAt ?? null
+  const ms = at ? Date.parse(at) : NaN
+  const age = ageSeconds(ms, now)
+
+  return {
+    received_at: Number.isNaN(ms) ? null : localIso(ms),
+    age_seconds: age,
+    fresh: age !== null && age <= maxAgeSeconds,
+    source: entry.source ?? 'reply',
+  }
+}
+
+function windowStatus(entry, now, fallbackAt, maxAgeSeconds) {
   const resetMs = entry.resets_at ? Date.parse(entry.resets_at) : NaN
   const resetsAt = Number.isNaN(resetMs) ? null : localIso(resetMs)
+  const reading = readingOf(entry, now, fallbackAt, maxAgeSeconds)
   if (!Number.isNaN(resetMs) && resetMs <= now) {
     // The window started over, but no reading has said where it stands now:
     // report the old one as old, never as a made-up 0%.
@@ -87,7 +105,7 @@ function windowStatus(entry, now) {
       used_percent: null,
       remaining_percent: null,
       resets_at: resetsAt,
-      last_reading: { used_percent: entry.used_percent },
+      last_reading: { used_percent: entry.used_percent, ...reading, fresh: false },
       note: 'This window has reset. A new reading comes with the next reply in Claude Code.',
     }
   }
@@ -97,6 +115,7 @@ function windowStatus(entry, now) {
     used_percent: entry.used_percent,
     remaining_percent: round1(Math.max(0, 100 - entry.used_percent)),
     resets_at: resetsAt,
+    reading,
   }
 }
 
@@ -112,7 +131,16 @@ function unavailable(base, reason, detail, maxAge) {
     other: [],
     missing: ['five_hour', 'weekly'],
     awaiting_new_reading: false,
-    reading: { updated_at: null, age_seconds: null, fresh: false, status: 'unavailable', max_age_seconds: maxAge },
+    reading: {
+      updated_at: null,
+      age_seconds: null,
+      oldest_age_seconds: null,
+      fresh: false,
+      status: 'unavailable',
+      max_age_seconds: maxAge,
+      source: 'claude-code-replies',
+    },
+    plugin: { refreshed_at: null, refresh_age_seconds: null, snapshot_written_at: null },
   }
 }
 
@@ -137,16 +165,24 @@ export function buildStatus(found, { now = Date.now(), maxAgeSeconds = DEFAULT_M
   const byKind = kind => windows.find(w => w.kind === kind)
   const fiveHour = byKind('five_hour')
   const weekly = byKind('seven_day')
-  const five_hour = fiveHour ? windowStatus(fiveHour, now) : null
-  const week = weekly ? windowStatus(weekly, now) : null
+  const status = w => windowStatus(w, now, snapshot.reading_at, maxAgeSeconds)
+  const five_hour = fiveHour ? status(fiveHour) : null
+  const week = weekly ? status(weekly) : null
   const other = windows
     .filter(w => w.kind !== 'five_hour' && w.kind !== 'seven_day')
-    .map(w => ({ kind: w.kind, ...windowStatus(w, now) }))
+    .map(w => ({ kind: w.kind, ...status(w) }))
 
+  // The newest reading, and whether every window still running is fresh: one
+  // old window makes the whole status stale.
   const readMs = snapshot.reading_at ? Date.parse(snapshot.reading_at) : NaN
-  const age = Number.isNaN(readMs) ? null : Math.max(0, Math.floor((now - readMs) / 1000))
-  const fresh = age !== null && age <= maxAgeSeconds
+  const age = ageSeconds(readMs, now)
   const all = [five_hour, week, ...other].filter(Boolean)
+  const running = all.filter(w => w.state === 'current')
+  const ages = running.map(w => w.reading.age_seconds)
+  const oldest = ages.includes(null) || ages.length === 0 ? null : Math.max(...ages)
+  const fresh = running.length > 0 && running.every(w => w.reading.fresh)
+  const refreshMs = snapshot.refreshed_at ? Date.parse(snapshot.refreshed_at) : NaN
+  const writtenMs = snapshot.written_at ? Date.parse(snapshot.written_at) : NaN
 
   return {
     ...base,
@@ -159,9 +195,19 @@ export function buildStatus(found, { now = Date.now(), maxAgeSeconds = DEFAULT_M
     reading: {
       updated_at: Number.isNaN(readMs) ? null : localIso(readMs),
       age_seconds: age,
+      oldest_age_seconds: oldest,
       fresh,
       status: fresh ? 'fresh' : 'stale',
       max_age_seconds: maxAgeSeconds,
+      // Readings come only with Claude Code replies. The IDE's own Account &
+      // Usage panel reads a source that Claude Code does not give plugins.
+      source: 'claude-code-replies',
+    },
+    // A plugin refresh or a file write is not a new reading: they are kept apart.
+    plugin: {
+      refreshed_at: Number.isNaN(refreshMs) ? null : localIso(refreshMs),
+      refresh_age_seconds: ageSeconds(refreshMs, now),
+      snapshot_written_at: Number.isNaN(writtenMs) ? null : localIso(writtenMs),
     },
   }
 }
@@ -199,13 +245,16 @@ export function formatText(status) {
       r.fresh ? 'fresh' : 'STALE, send a message in Claude Code to refresh it'
     }`,
   ]
+  if (status.plugin.refreshed_at) lines.push(`Plugin last checked ${ago(status.plugin.refresh_age_seconds)}`)
   const line = (name, w) => {
     if (!w) return `${name}: no reading`
     if (w.state === 'expired') {
       return `${name}: reset at ${clock(w.resets_at)}, waiting for a new reading (was ${w.last_reading.used_percent}%)`
     }
 
-    return `${name}: ${w.used_percent}% used, ${w.remaining_percent}% left${w.resets_at ? `, resets ${clock(w.resets_at)}` : ''}`
+    const lag = w.reading.age_seconds !== null && w.reading.age_seconds !== r.age_seconds ? ` (read ${ago(w.reading.age_seconds)})` : ''
+
+    return `${name}: ${w.used_percent}% used, ${w.remaining_percent}% left${w.resets_at ? `, resets ${clock(w.resets_at)}` : ''}${lag}`
   }
   lines.push(line('5-hour', status.five_hour), line('Weekly', status.weekly))
   for (const w of status.other) lines.push(line(w.kind, w))

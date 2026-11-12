@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { amount, paceOf, setUtcOffset, when } from './charts'
-import { ageOf, mergeLimits, predict } from './register'
+import { ageOf, foldReadings, latestReadAt, mergeLimits, newerReading, predict, withTimes } from './register'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -228,10 +228,106 @@ test('a new reading is saved for the usage-bar CLI, once', async ($, on) => {
   expect(saved.length).toBe(1)
   expect(saved[0]?.argv[0]).toBe('node')
   expect(saved[0]?.argv[2]).toBe('D:\\data\\usage bar')
-  expect(JSON.parse(saved[0]?.stdin ?? '{}')).toEqual({ readAt: RESET - 3 * DAY, limits: measured })
+  const at = RESET - 3 * DAY
+  expect(JSON.parse(saved[0]?.stdin ?? '{}')).toEqual({
+    refreshedAt: at,
+    limits: measured.map(l => ({ ...l, readAt: at, source: 'reply' })),
+  })
 
   // The same reading again writes nothing new.
   await $.session.measure({ context: { window: 200_000 }, rateLimits: measured, changed: [] })
   await clock.settle()
   expect(runs.filter(r => (r.argv[1] ?? '').endsWith('scanner/snapshot.mjs')).length).toBe(1)
+})
+
+describe('readings keep their own time', () => {
+  const R5 = new Date(RESET - 2 * DAY).toISOString()
+  const at = RESET - 3 * DAY
+
+  test('a periodic refresh with no new account data never makes a reading newer', () => {
+    const own = new Map()
+    const first = foldReadings([], own, [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at, true)
+    expect(latestReadAt(first)).toBe(at)
+    // Forty minutes of refreshes, the session still showing the same 71%.
+    const later = foldReadings(first, own, [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at + 40 * 60_000, false)
+    expect(later[0]?.readAt).toBe(at)
+    expect(later[0]?.percentUsed).toBe(71)
+  })
+
+  test('the 71% / 74% case: a newer reading in the shared store is not pulled back by an idle session', () => {
+    const idle = new Map()
+    foldReadings([], idle, [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at, true)
+    // Another session saved 74% ten minutes later.
+    const store = [{ kind: 'five_hour', percentUsed: 74, resetsAt: R5, readAt: at + 10 * 60_000, source: 'reply' }]
+    const merged = foldReadings(store, idle, [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at + 12 * 60_000, false)
+    expect(merged[0]?.percentUsed).toBe(74)
+    expect(merged[0]?.readAt).toBe(at + 10 * 60_000)
+  })
+
+  test('a session heals a store another session overwrote with an older reading', () => {
+    const own = new Map()
+    foldReadings([], own, [{ kind: 'five_hour', percentUsed: 76, resetsAt: R5 }], at + 20 * 60_000, true)
+    const clobbered = [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5, readAt: at, source: 'reply' }]
+    const merged = foldReadings(clobbered, own, [{ kind: 'five_hour', percentUsed: 76, resetsAt: R5 }], at + 21 * 60_000, false)
+    expect(merged[0]?.percentUsed).toBe(76)
+    expect(merged[0]?.readAt).toBe(at + 20 * 60_000)
+  })
+
+  test('a figure that changed between refreshes is a new reading, from a poll', () => {
+    const own = new Map()
+    foldReadings([], own, [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at, true)
+    const merged = foldReadings([], own, [{ kind: 'five_hour', percentUsed: 73, resetsAt: R5 }], at + 60_000, false)
+    expect(merged[0]?.percentUsed).toBe(73)
+    expect(merged[0]?.source).toBe('poll')
+  })
+
+  test("a session's figures of unknown time never beat a timed reading of the same window", () => {
+    const store = [{ kind: 'five_hour', percentUsed: 74, resetsAt: R5, readAt: at, source: 'reply' }]
+    const merged = foldReadings(store, new Map(), [{ kind: 'five_hour', percentUsed: 80, resetsAt: R5 }], at + 60_000, false)
+    expect(merged[0]?.percentUsed).toBe(74)
+    const alone = foldReadings([], new Map(), [{ kind: 'five_hour', percentUsed: 80, resetsAt: R5 }], at, false)
+    expect(alone[0]?.readAt).toBe(0)
+    expect(alone[0]?.source).toBe('session')
+  })
+
+  test('windows are handled on their own, and an older reset window loses', () => {
+    const later = new Date(RESET - DAY).toISOString()
+    expect(newerReading({ kind: 'five_hour', percentUsed: 97, resetsAt: R5, readAt: at + 9 }, { kind: 'five_hour', percentUsed: 3, resetsAt: later, readAt: at })?.percentUsed).toBe(3)
+    const merged = mergeLimits(
+      [{ kind: 'five_hour', percentUsed: 70, resetsAt: R5, readAt: at + 5 }, { kind: 'seven_day', percentUsed: 79, resetsAt, readAt: at }],
+      [{ kind: 'five_hour', percentUsed: 65, resetsAt: R5, readAt: at }, { kind: 'seven_day', percentUsed: 81, resetsAt, readAt: at + 5 }],
+    )
+    expect(merged.find(l => l.kind === 'five_hour')?.percentUsed).toBe(70)
+    expect(merged.find(l => l.kind === 'seven_day')?.percentUsed).toBe(81)
+  })
+
+  test('readings saved by 1.3.0 take the one time those versions kept', () => {
+    const migrated = withTimes([{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }], at)
+    expect(migrated[0]?.readAt).toBe(at)
+  })
+})
+
+test('a periodic refresh writes the refresh time, never a new reading time', async ($, on) => {
+  const clock = mock.clock(on, { now: RESET - 3 * DAY })
+  const at = RESET - 3 * DAY
+  const R5 = new Date(RESET - 2 * DAY).toISOString()
+  mock.store(on, { limits: [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5, readAt: at - 40 * 60_000, source: 'reply' }], limitsAt: at - 40 * 60_000 })
+  mock.env(on, { USAGE_BAR_CACHE_DIR: 'D:\\data' })
+  const runs: string[] = []
+  on('process.run', (_, e) => {
+    if ((e.argv[1] ?? '').endsWith('scanner/snapshot.mjs')) runs.push(e.init?.stdin ?? '')
+
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [{ kind: 'five_hour', percentUsed: 71, resetsAt: R5 }] } }))
+  on('command.register', () => ({ value: { command: 'usage-bar' } }))
+  on('session.surfaces', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await clock.settle()
+  const sent = JSON.parse(runs[runs.length - 1] ?? '{}')
+  expect(sent.refreshedAt).toBe(at)
+  expect(sent.limits[0].readAt).toBe(at - 40 * 60_000)
+  expect(sent.limits[0].percentUsed).toBe(71)
 })

@@ -82,22 +82,39 @@ function current(limit: Limit | undefined, now: number): Limit | undefined {
   return limit
 }
 
+const resetMs = (limit: Limit) => (limit.resetsAt ? Date.parse(limit.resetsAt) : 0)
+
+// Which of two readings of one window to keep. A later window (its reset more
+// than an hour later) is newer than any reading of an earlier one. Inside one
+// window the reading Claude Code reported later wins, whatever its percentage;
+// only two readings stamped with the same time fall back to the higher figure,
+// since usage inside a window only rises.
+export function newerReading(held: Limit, next: Limit): Limit {
+  const heldReset = resetMs(held)
+  const nextReset = resetMs(next)
+  if (Math.abs(heldReset - nextReset) >= HOUR) return nextReset > heldReset ? next : held
+  const heldAt = held.readAt ?? 0
+  const nextAt = next.readAt ?? 0
+  if (heldAt !== nextAt) return nextAt > heldAt ? next : held
+
+  return next.percentUsed > held.percentUsed ? next : held
+}
+
 // Several sessions report the same account windows, some of them idle and out
-// of date. Inside one window usage only rises, so the later reset wins, then the
-// higher percentage.
+// of date: each window keeps its newest reading, on its own.
 export function mergeLimits(a: readonly Limit[], b: readonly Limit[]): Limit[] {
   const out = new Map<string, Limit>()
   for (const limit of [...a, ...b]) {
     const held = out.get(limit.kind)
-    const heldAt = held?.resetsAt ? Date.parse(held.resetsAt) : 0
-    const at = limit.resetsAt ? Date.parse(limit.resetsAt) : 0
-    const isSameWindow = Math.abs(heldAt - at) < HOUR
-    if (!held || (isSameWindow ? limit.percentUsed >= held.percentUsed : at > heldAt)) {
-      out.set(limit.kind, limit)
-    }
+    out.set(limit.kind, held ? newerReading(held, limit) : limit)
   }
 
   return [...out.values()]
+}
+
+// The time of the newest reading among the windows; 0 when none has one.
+export function latestReadAt(list: readonly Limit[]): number {
+  return list.reduce((latest, limit) => Math.max(latest, limit.readAt ?? 0), 0)
 }
 
 // How old the limit reading is, once it is old enough to matter. Claude Code
@@ -163,7 +180,53 @@ const isView = (v: unknown): v is View =>
 let isScanning = false
 let lastScanAt = 0
 
-// `isFresh`: a reply just came in, so the reading is new even if no number moved.
+// What this session itself was told, per window, and when. Kept so a session
+// re-asserts its own newest reading with its true time: a store or snapshot that
+// another session overwrote with an older one heals at the next refresh.
+const ownReadings = new Map<string, Limit>()
+
+const plain = (l: { kind: string; percentUsed: number; resetsAt?: string }) => ({
+  kind: l.kind,
+  percentUsed: l.percentUsed,
+  ...(l.resetsAt === undefined ? {} : { resetsAt: l.resetsAt }),
+})
+
+// Readings saved before 1.4.0 carry no time of their own: they take the one
+// time those versions kept for all of them.
+export function withTimes(stored: readonly Limit[], legacyAt: number): Limit[] {
+  return stored.map(l => (l.readAt === undefined ? { ...l, readAt: legacyAt, source: l.source ?? 'reply' } : l))
+}
+
+// Folds what this session sees into the shared reading. `reported` is either a
+// reading that just arrived (`isFresh`: a turn ended or a window moved, so it is
+// stamped now) or the session's standing figures from a periodic refresh. The
+// latter are only news when they differ from what this session last saw, which
+// means a reply arrived in between; otherwise they carry no time and can never
+// make an old reading look new.
+export function foldReadings(
+  stored: readonly Limit[],
+  own: Map<string, Limit>,
+  reported: readonly { kind: string; percentUsed: number; resetsAt?: string }[],
+  now: number,
+  isFresh: boolean,
+): Limit[] {
+  const untimed: Limit[] = []
+  for (const r of reported) {
+    const seen = own.get(r.kind)
+    const isChanged = !seen || seen.percentUsed !== r.percentUsed || seen.resetsAt !== r.resetsAt
+    if (isFresh) {
+      own.set(r.kind, { ...plain(r), readAt: now, source: 'reply' })
+    } else if (seen && isChanged) {
+      own.set(r.kind, { ...plain(r), readAt: now, source: 'poll' })
+    } else if (!seen) {
+      untimed.push({ ...plain(r), readAt: 0, source: 'session' })
+    }
+  }
+
+  return mergeLimits(mergeLimits(stored, untimed), [...own.values()])
+}
+
+// `isFresh`: Claude Code just reported limits (a turn ended, or a window moved).
 async function refresh($: Api, seen?: readonly Limit[], isFresh = false): Promise<void> {
   const now = await $.clock.now()
   const stored = await $.store.get('limits')
@@ -174,11 +237,13 @@ async function refresh($: Api, seen?: readonly Limit[], isFresh = false): Promis
     ...(usage.cost === undefined ? {} : { usd: usage.cost.usd }),
   }
   await update($, session, () => stats)
-  const before = isArray(stored) ? (stored as Limit[]) : []
-  const merged = mergeLimits(before, reported)
   const heldAt = await $.store.get('limitsAt')
-  const isNew = isFresh || JSON.stringify(before) !== JSON.stringify(merged)
-  const readAt = isNew || typeof heldAt !== 'number' ? now : heldAt
+  const before = withTimes(
+    isArray(stored) ? (stored as Limit[]) : [],
+    typeof heldAt === 'number' ? heldAt : 0,
+  )
+  const merged = foldReadings(before, ownReadings, reported, now, isFresh)
+  const readAt = latestReadAt(merged)
   const held = await $.store.get('samples')
   const history = nextSamples(isArray(held) ? (held as Sample[]) : [], merged, now)
   await $.store.set('limits', merged)
@@ -188,25 +253,33 @@ async function refresh($: Api, seen?: readonly Limit[], isFresh = false): Promis
   await update($, limits, () => merged)
   await update($, samples, () => history)
   await update($, tick, n => n + 1)
-  void writeSnapshot($, merged, readAt)
+  void writeSnapshot($, merged, now)
 }
 
-// The reading last saved for the `usage-bar` CLI, so it is written only when it changes.
+// The readings last saved for the `usage-bar` CLI, and when the refresh time
+// was last saved, so status.json is rewritten when a reading changes and
+// otherwise only every few minutes, to keep `refreshed_at` current.
 let lastSnapshot = ''
+let lastSnapshotRefresh = 0
+const SNAPSHOT_HEARTBEAT = 5 * MIN
 
-// Saves the reading the bar shows to status.json in the cache folder, where the
-// read-only `usage-bar` CLI finds it. Node writes it atomically and puts the CLI
-// beside it; this module's own file calls cannot rename. A failure leaves the bar
-// as it is.
-async function writeSnapshot($: Api, list: readonly Limit[], readAt: number): Promise<void> {
-  const payload = JSON.stringify({ readAt, limits: list })
-  if (payload === lastSnapshot) return
+// Saves the readings the bar shows to status.json in the cache folder, where the
+// read-only `usage-bar` CLI finds them. Node writes the file under a lock, keeps
+// the newer reading of each window where another session saved one, and renames
+// it into place; this module's own file calls cannot rename. A failure leaves the
+// bar as it is.
+async function writeSnapshot($: Api, list: readonly Limit[], refreshedAt: number): Promise<void> {
+  const readings = JSON.stringify(list)
+  if (readings === lastSnapshot && refreshedAt - lastSnapshotRefresh < SNAPSHOT_HEARTBEAT) return
   try {
     const run = await $.process.run(
       ['node', `${$.plugin.root}/scanner/snapshot.mjs`, await cacheDir($)],
-      { stdin: payload, timeoutMs: 30_000 },
+      { stdin: JSON.stringify({ refreshedAt, limits: list }), timeoutMs: 30_000 },
     )
-    if (run.exitCode === 0) lastSnapshot = payload
+    if (run.exitCode === 0) {
+      lastSnapshot = readings
+      lastSnapshotRefresh = refreshedAt
+    }
   } catch {
     // No Node.js, or the folder cannot be written: the CLI keeps its last snapshot.
   }
@@ -341,7 +414,7 @@ export const register: Register = on => {
     const week = current(list.find(l => l.kind === 'seven_day'), now)
     const hour5 = current(list.find(l => l.kind === 'five_hour'), now)
     const readAt = await read($, limitsAt)
-    const prediction = predict(week, now, readAt)
+    const prediction = predict(week, now, list.find(l => l.kind === 'seven_day')?.readAt || readAt)
     const age = list.length > 0 ? ageOf(readAt, now) : null
     const totals = await read($, summary)
 
@@ -465,7 +538,7 @@ export const register: Register = on => {
     const week = current(list.find(l => l.kind === 'seven_day'), now)
     const history = await read($, samples)
     const readAt = await read($, limitsAt)
-    const prediction = predict(week, now, readAt)
+    const prediction = predict(week, now, list.find(l => l.kind === 'seven_day')?.readAt || readAt)
     const age = list.length > 0 ? ageOf(readAt, now) : null
     const totals = await read($, summary)
     const note = await read($, scanNote)

@@ -120,54 +120,88 @@ From macOS or Linux: `node ~/.claude/usage-bar/usage-bar.mjs status --json`.
 ```json
 {
   "schema_version": 1,
-  "generated_at": "2026-11-13T01:33:00+05:30",
-  "snapshot_path": "C:\Users\you\.claude\usage-bar\status.json",
+  "generated_at": "2026-11-13T01:52:30+05:30",
+  "snapshot_path": "C:\\Users\\you\\.claude\\usage-bar\\status.json",
   "available": true,
   "five_hour": {
     "state": "current",
-    "used_percent": 69,
-    "remaining_percent": 31,
-    "resets_at": "2026-11-13T04:40:00+05:30"
+    "used_percent": 76,
+    "remaining_percent": 24,
+    "resets_at": "2026-11-13T04:40:00+05:30",
+    "reading": {
+      "received_at": "2026-11-13T01:51:52+05:30",
+      "age_seconds": 38,
+      "fresh": true,
+      "source": "reply"
+    }
   },
   "weekly": {
     "state": "current",
-    "used_percent": 80,
-    "remaining_percent": 20,
-    "resets_at": "2026-11-17T11:30:00+05:30"
+    "used_percent": 81,
+    "remaining_percent": 19,
+    "resets_at": "2026-11-17T11:30:00+05:30",
+    "reading": {
+      "received_at": "2026-11-13T01:51:52+05:30",
+      "age_seconds": 38,
+      "fresh": true,
+      "source": "reply"
+    }
   },
   "other": [],
   "missing": [],
   "awaiting_new_reading": false,
   "reading": {
-    "updated_at": "2026-11-13T01:29:13+05:30",
-    "age_seconds": 226,
+    "updated_at": "2026-11-13T01:51:52+05:30",
+    "age_seconds": 38,
+    "oldest_age_seconds": 38,
     "fresh": true,
     "status": "fresh",
-    "max_age_seconds": 300
+    "max_age_seconds": 300,
+    "source": "claude-code-replies"
+  },
+  "plugin": {
+    "refreshed_at": "2026-11-13T01:52:10+05:30",
+    "refresh_age_seconds": 20,
+    "snapshot_written_at": "2026-11-13T01:52:10+05:30"
   }
 }
 ```
 
 ```
-Usage Bar, last reading 3m ago (Fri 1:29 AM): fresh
-5-hour: 69% used, 31% left, resets Fri 4:40 AM
-Weekly: 80% used, 20% left, resets Tue 11:30 AM
+Usage Bar, last reading 38s ago (Fri 1:51 AM): fresh
+Plugin last checked 20s ago
+5-hour: 76% used, 24% left, resets Fri 4:40 AM
+Weekly: 81% used, 19% left, resets Tue 11:30 AM
 ```
 
 Times are in your computer's timezone. Other windows Claude Code reports, such as a model's own weekly limit, are listed under `other`.
 
 ### Fresh, stale, reset and unavailable
 
-The output is always a saved reading, never a live one. `reading.updated_at` says when it was taken and `reading.age_seconds` how long ago.
+The output is always a saved reading, never a live one. Three different times are kept apart:
 
-- **Fresh:** read within `--max-age` seconds.
-- **Stale:** older than that. The numbers are still the last ones Claude Code sent. Send any message in Claude Code to refresh them.
+| Field | What it is |
+| --- | --- |
+| `<window>.reading.received_at` | When Claude Code reported that window's figure. Each window has its own. |
+| `reading.updated_at` | The newest of those |
+| `plugin.refreshed_at` | When a Claude Code session with the plugin last checked for readings. A check that found nothing new does not make a reading newer. |
+| `plugin.snapshot_written_at` | When `status.json` was last written. A write is not a reading either. |
+
+- **Fresh:** every window still running was read within `--max-age` seconds.
+- **Stale:** at least one was read longer ago (`reading.oldest_age_seconds`). The numbers are still the last ones Claude Code sent. Send any message in Claude Code to refresh them.
 - **Reset:** when a window's reset time passes before a new reading arrives, that window shows `"state": "expired"` with `used_percent` and `remaining_percent` set to `null`, the old figure under `last_reading`, and `awaiting_new_reading: true`. The command does not pretend you are at 0%: the real figure comes with the next reply. (The bar itself draws a reset window as 0% straight away.)
 - **Unavailable:** `available: false`, with a `reason` and `message`. The reasons are `no_snapshot` (no reading saved yet), `corrupt_snapshot`, `unreadable_snapshot`, `unsupported_schema` and `no_windows`. A window Claude Code has not reported is `null` and named in `missing`.
 
+A window's `reading.source` says how its figure arrived: `reply` (Claude Code reported it after a turn, or when the window moved a whole point), `poll` (a session's figure changed between two of the plugin's checks) or `session` (a session's figure whose time is unknown, kept only when nothing better exists).
+
+### Several chats at once
+
+Every chat with the plugin writes to the same `status.json`. Each write takes a lock, reads what is there and keeps, for each window on its own, the newer reading: a window with a later reset beats any reading of an earlier window, and within one window the reading Claude Code reported later wins, even if its figure is lower. An idle chat therefore never puts an older reading back over a newer one.
+
 ### Limitations
 
-- It is only as current as the last reply in a chat with Usage Bar. Usage on your phone, on the web or in chats without the plugin shows up after the next reply.
+- **Readings come only with replies.** Claude Code gives a plugin the account's limits with each reply in a chat that has the plugin, and nowhere else. Usage on your phone, on the web, or in chats without Usage Bar 1.3.0 or newer (restart Claude Code, or run `/reload-plugins`, after updating) shows up after the next reply in a chat with it.
+- **The IDE's Account & Usage panel is a different source.** The panel in the VS Code extension fetches your account usage on its own, so it can be ahead of the last reply, and it lists windows Claude Code does not pass to plugins (such as a model's own limit). Claude Code offers plugins no supported way to read that panel, so Usage Bar does not, and it does not scrape it. After any reply in a chat with Usage Bar, the 5-hour and weekly figures match the panel.
 - `status.json` is replaced by renaming a finished file over it, so a reader never sees half a file.
 - It needs Node.js on your PATH, as the token totals do.
 
@@ -200,7 +234,7 @@ The totals live in `~/.claude/usage-bar`. To keep them somewhere else, set the `
 ```bash
 claude plugin validate .
 claude plugin test .
-node --test tests/cli.node-test.mjs
+node --test tests/cli.node-test.mjs tests/readings.node-test.mjs
 claude --plugin-dir .
 ```
 

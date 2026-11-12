@@ -49,7 +49,13 @@ const runCli = (args, env = {}) =>
 test('1. valid usage data', () => {
   const s = status(snapshot([FIVE, WEEK]))
   assert.equal(s.available, true)
-  assert.deepEqual(s.five_hour, { state: 'current', used_percent: 68, remaining_percent: 32, resets_at: localIso(NOW + 3 * HOUR) })
+  assert.deepEqual(s.five_hour, {
+    state: 'current',
+    used_percent: 68,
+    remaining_percent: 32,
+    resets_at: localIso(NOW + 3 * HOUR),
+    reading: { received_at: localIso(NOW - 2 * MIN), age_seconds: 120, fresh: true, source: 'reply' },
+  })
   assert.equal(s.weekly.used_percent, 80)
   assert.equal(s.weekly.remaining_percent, 20)
   assert.equal(s.reading.age_seconds, 120)
@@ -108,7 +114,8 @@ test('6. expired five-hour reset', () => {
   assert.equal(s.five_hour.state, 'expired')
   assert.equal(s.five_hour.used_percent, null, 'never claims a 0% reading it did not receive')
   assert.equal(s.five_hour.remaining_percent, null)
-  assert.deepEqual(s.five_hour.last_reading, { used_percent: 68 })
+  assert.equal(s.five_hour.last_reading.used_percent, 68)
+  assert.equal(s.five_hour.last_reading.fresh, false)
   assert.equal(s.five_hour.resets_at, localIso(NOW - MIN))
   assert.equal(s.weekly.state, 'current')
   assert.equal(s.awaiting_new_reading, true)
@@ -120,7 +127,7 @@ test('7. expired weekly reset', () => {
   const s = status(snapshot([FIVE, old]))
   assert.equal(s.weekly.state, 'expired')
   assert.equal(s.weekly.used_percent, null)
-  assert.deepEqual(s.weekly.last_reading, { used_percent: 80 })
+  assert.equal(s.weekly.last_reading.used_percent, 80)
   assert.equal(s.five_hour.state, 'current')
   assert.equal(s.awaiting_new_reading, true)
 })
