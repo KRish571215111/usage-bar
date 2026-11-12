@@ -203,3 +203,35 @@ test('a reading says how old it is once that matters', () => {
   expect(ageOf(RESET, RESET + 2 * HOUR)).toBe('Reading 2h 0m old')
   expect(ageOf(0, RESET)).toBeNull()
 })
+
+test('a new reading is saved for the usage-bar CLI, once', async ($, on) => {
+  const clock = mock.clock(on, { now: RESET - 3 * DAY })
+  mock.store(on)
+  mock.env(on, { USAGE_BAR_CACHE_DIR: 'D:\\data\\usage bar' })
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  on('process.run', (_, e) => {
+    runs.push({ argv: e.argv, ...(e.init?.stdin === undefined ? {} : { stdin: e.init.stdin }) })
+
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [] } }))
+  // Stands for the engine beneath the plugin.
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  const measured = [
+    { kind: 'five_hour', percentUsed: 68, resetsAt: new Date(RESET - 2 * DAY).toISOString() },
+    { kind: 'seven_day', percentUsed: 80, resetsAt },
+  ]
+
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: measured, changed: ['rateLimits'] })
+  await clock.settle()
+  const saved = runs.filter(r => (r.argv[1] ?? '').endsWith('scanner/snapshot.mjs'))
+  expect(saved.length).toBe(1)
+  expect(saved[0]?.argv[0]).toBe('node')
+  expect(saved[0]?.argv[2]).toBe('D:\\data\\usage bar')
+  expect(JSON.parse(saved[0]?.stdin ?? '{}')).toEqual({ readAt: RESET - 3 * DAY, limits: measured })
+
+  // The same reading again writes nothing new.
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: measured, changed: [] })
+  await clock.settle()
+  expect(runs.filter(r => (r.argv[1] ?? '').endsWith('scanner/snapshot.mjs')).length).toBe(1)
+})

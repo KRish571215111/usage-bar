@@ -188,6 +188,28 @@ async function refresh($: Api, seen?: readonly Limit[], isFresh = false): Promis
   await update($, limits, () => merged)
   await update($, samples, () => history)
   await update($, tick, n => n + 1)
+  void writeSnapshot($, merged, readAt)
+}
+
+// The reading last saved for the `usage-bar` CLI, so it is written only when it changes.
+let lastSnapshot = ''
+
+// Saves the reading the bar shows to status.json in the cache folder, where the
+// read-only `usage-bar` CLI finds it. Node writes it atomically and puts the CLI
+// beside it; this module's own file calls cannot rename. A failure leaves the bar
+// as it is.
+async function writeSnapshot($: Api, list: readonly Limit[], readAt: number): Promise<void> {
+  const payload = JSON.stringify({ readAt, limits: list })
+  if (payload === lastSnapshot) return
+  try {
+    const run = await $.process.run(
+      ['node', `${$.plugin.root}/scanner/snapshot.mjs`, await cacheDir($)],
+      { stdin: payload, timeoutMs: 30_000 },
+    )
+    if (run.exitCode === 0) lastSnapshot = payload
+  } catch {
+    // No Node.js, or the folder cannot be written: the CLI keeps its last snapshot.
+  }
 }
 
 // Where the scanner keeps its totals: USAGE_BAR_CACHE_DIR, else beside the
